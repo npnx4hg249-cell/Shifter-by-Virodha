@@ -78,7 +78,7 @@ When the constraint solver cannot satisfy all rules, the system provides:
 ## What's New in v2.0
 
 ### Major Features
-1. **Renamed to ICES-Shifter** (Intelligent Constraint-based Engineering Scheduler)
+1. **Renamed to ICES-Shifter**  Intelligent Constraint-based Engineering Scheduler ( That is not what it stands for but good try)
 2. **Version Management** - Semantic versioning with changelog
 3. **Auto-Update from GitHub** - Check and apply updates from within the admin portal
 4. **Excel Import/Export** - Support for .xlsx files in addition to CSV
