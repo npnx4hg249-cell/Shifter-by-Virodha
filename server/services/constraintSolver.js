@@ -1,8 +1,14 @@
 /**
- * CC Shifter Constraint Solver
+ * ICES-Shifter Constraint Solver
  *
+ * Intelligent Constraint-based Engineering Scheduler
  * Uses a constraint propagation and backtracking approach to generate
  * valid shift schedules. Implements all hard rules from the specification.
+ *
+ * Shift Consistency Rule:
+ * - Early/Morning shifts should stay together week-to-week
+ * - Late shifts should stay consistent week-to-week
+ * - Night shifts should stay consistent for at least 2 weeks
  */
 
 import {
@@ -77,6 +83,16 @@ const FORBIDDEN_TRANSITIONS = [
   [SHIFTS.EARLY, SHIFTS.NIGHT],
   [SHIFTS.MORNING, SHIFTS.NIGHT]
 ];
+
+// Shift consistency groups - shifts that should stay together
+const SHIFT_CONSISTENCY_GROUPS = {
+  day_early: [SHIFTS.EARLY, SHIFTS.MORNING],  // Early/Morning stay together
+  day_late: [SHIFTS.LATE],                     // Late stays consistent
+  night: [SHIFTS.NIGHT]                        // Night stays for 2+ weeks
+};
+
+// Minimum weeks for night shift consistency
+const NIGHT_CONSISTENCY_WEEKS = 2;
 
 /**
  * Main constraint solver class
@@ -182,10 +198,31 @@ export class ShiftScheduler {
 
   /**
    * Check if an engineer can work a specific shift
+   * @param {Object} engineer - The engineer object
+   * @param {string} shift - The shift type (Early, Morning, Late, Night)
+   * @param {Date} date - Optional date to check weekend preferences
    */
-  canWorkShift(engineer, shift) {
+  canWorkShift(engineer, shift, date = null) {
     // Check preferences
     if (engineer.preferences && engineer.preferences.length > 0) {
+      // If date is provided, check for weekend-specific preferences
+      if (date && this.isWeekend(date)) {
+        // Check for weekend-specific preference first
+        const weekendPref = `Weekend${shift}`;
+        if (engineer.preferences.includes(weekendPref)) {
+          return true;
+        }
+        // If no weekend-specific preference, check if they have regular shift preference
+        // but NOT if they have weekend preferences defined (meaning they explicitly chose weekend shifts)
+        const hasAnyWeekendPref = engineer.preferences.some(p => p.startsWith('Weekend'));
+        if (hasAnyWeekendPref) {
+          // They have weekend preferences defined, so only allow if weekend shift is in preferences
+          return false;
+        }
+        // No weekend preferences defined, fall back to regular preferences
+        return engineer.preferences.includes(shift);
+      }
+      // Weekday - check regular preferences
       return engineer.preferences.includes(shift);
     }
     // If no preferences specified, can work any shift
@@ -225,6 +262,61 @@ export class ShiftScheduler {
     }
 
     return count;
+  }
+
+  /**
+   * Get an engineer's dominant shift type in a week
+   * Returns the shift group (day_early, day_late, night) they worked most
+   */
+  getDominantShiftGroup(schedule, engineerId, week) {
+    const shiftCounts = {
+      day_early: 0,
+      day_late: 0,
+      night: 0
+    };
+
+    for (const day of week) {
+      const dateStr = format(day, 'yyyy-MM-dd');
+      const shift = schedule[engineerId]?.[dateStr];
+
+      if (SHIFT_CONSISTENCY_GROUPS.day_early.includes(shift)) {
+        shiftCounts.day_early++;
+      } else if (SHIFT_CONSISTENCY_GROUPS.day_late.includes(shift)) {
+        shiftCounts.day_late++;
+      } else if (SHIFT_CONSISTENCY_GROUPS.night.includes(shift)) {
+        shiftCounts.night++;
+      }
+    }
+
+    // Find the dominant group
+    let maxCount = 0;
+    let dominantGroup = null;
+    for (const [group, count] of Object.entries(shiftCounts)) {
+      if (count > maxCount) {
+        maxCount = count;
+        dominantGroup = group;
+      }
+    }
+
+    return { group: dominantGroup, count: maxCount };
+  }
+
+  /**
+   * Check if a shift matches the engineer's preferred consistency group
+   * This helps maintain week-to-week shift consistency
+   */
+  matchesConsistencyPreference(shift, preferredGroup) {
+    if (!preferredGroup) return true; // No preference established yet
+
+    if (preferredGroup === 'day_early') {
+      return SHIFT_CONSISTENCY_GROUPS.day_early.includes(shift);
+    } else if (preferredGroup === 'day_late') {
+      return SHIFT_CONSISTENCY_GROUPS.day_late.includes(shift);
+    } else if (preferredGroup === 'night') {
+      return SHIFT_CONSISTENCY_GROUPS.night.includes(shift);
+    }
+
+    return true;
   }
 
   /**
@@ -322,8 +414,11 @@ export class ShiftScheduler {
   assignNightShifts(schedule, engineers, days, weeks) {
     const errors = [];
 
-    // Find engineers who can work nights
-    const nightEligible = engineers.filter(e => this.canWorkShift(e, SHIFTS.NIGHT));
+    // Find engineers who can work nights (check both weekday and weekend nights)
+    const nightEligible = engineers.filter(e =>
+      this.canWorkShift(e, SHIFTS.NIGHT) ||
+      (e.preferences && e.preferences.includes('WeekendNight'))
+    );
 
     if (nightEligible.length < 2) {
       errors.push({
@@ -391,7 +486,8 @@ export class ShiftScheduler {
           if (assigned >= coverage[SHIFTS.NIGHT].preferred) break;
 
           if (schedule[engineer.id][dateStr] === null &&
-              this.isEngineerAvailable(engineer, day)) {
+              this.isEngineerAvailable(engineer, day) &&
+              this.canWorkShift(engineer, SHIFTS.NIGHT, day)) {
             // Check transition validity
             const prevDay = addDays(day, -1);
             const prevDateStr = format(prevDay, 'yyyy-MM-dd');
@@ -437,7 +533,7 @@ export class ShiftScheduler {
         const eligible = engineers.filter(e => {
           if (schedule[e.id][dateStr] !== null) return false; // Already assigned
           if (!this.isEngineerAvailable(e, day)) return false;
-          if (!this.canWorkShift(e, shift)) return false;
+          if (!this.canWorkShift(e, shift, day)) return false;
 
           // Check transition validity
           const prevDay = addDays(day, -1);
@@ -452,8 +548,33 @@ export class ShiftScheduler {
           return true;
         });
 
-        // Sort by who has worked least this week
+        // Sort by: 1) shift consistency preference, 2) who has worked least this week
         eligible.sort((a, b) => {
+          // Find current week index
+          const currentWeekIndex = weeks.findIndex(w =>
+            w.some(d => isSameDay(d, day))
+          );
+
+          // Get previous week's dominant shift group for consistency
+          let aPreferredGroup = null;
+          let bPreferredGroup = null;
+
+          if (currentWeekIndex > 0) {
+            const prevWeek = weeks[currentWeekIndex - 1];
+            aPreferredGroup = this.getDominantShiftGroup(schedule, a.id, prevWeek).group;
+            bPreferredGroup = this.getDominantShiftGroup(schedule, b.id, prevWeek).group;
+          }
+
+          // Check consistency match for this shift
+          const aMatchesConsistency = this.matchesConsistencyPreference(shift, aPreferredGroup) ? 0 : 1;
+          const bMatchesConsistency = this.matchesConsistencyPreference(shift, bPreferredGroup) ? 0 : 1;
+
+          // Prefer engineers whose previous week matches this shift type
+          if (aMatchesConsistency !== bMatchesConsistency) {
+            return aMatchesConsistency - bMatchesConsistency;
+          }
+
+          // Secondary sort: who has worked least this week
           const weekStart = startOfWeek(day, { weekStartsOn: 1 });
           const weekEnd = endOfWeek(day, { weekStartsOn: 1 });
           const weekDays = eachDayOfInterval({ start: weekStart, end: day });
@@ -622,7 +743,7 @@ export class ShiftScheduler {
 
               // Check availability
               if (!this.isEngineerAvailable(floater, day)) continue;
-              if (!this.canWorkShift(floater, shift)) continue;
+              if (!this.canWorkShift(floater, shift, day)) continue;
               if (schedule[floater.id][dateStr] !== null) continue;
 
               // Check no other floater on same shift
