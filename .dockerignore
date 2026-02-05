@@ -1,0 +1,34 @@
+# Dependencies
+node_modules
+client/node_modules
+
+# Build output (will be built in container)
+client/dist
+
+# Data files (should be mounted as volume)
+server/data/storage
+
+# Development files
+*.log
+*.md
+.git
+.gitignore
+
+# Test files
+test-scheduler.js
+seed-test-data.js
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+.env.*.local

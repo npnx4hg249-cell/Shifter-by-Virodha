@@ -101,6 +101,42 @@ Email: admin@example.com
 Password: admin123
 ```
 
+## Docker
+
+### Quick Start with Docker Compose
+```bash
+docker-compose up -d
+```
+
+The application will be available at `http://localhost:3001`
+
+### Build and Run Manually
+```bash
+# Build the image
+docker build -t cc-shifter .
+
+# Run the container
+docker run -d \
+  --name cc-shifter \
+  -p 3001:3001 \
+  -v cc-shifter-data:/app/server/data/storage \
+  -e JWT_SECRET=your-secret-key \
+  cc-shifter
+```
+
+### Environment Variables
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | 3001 | Server port |
+| `NODE_ENV` | production | Environment mode |
+| `JWT_SECRET` | (default) | Secret for JWT tokens (change in production!) |
+
+### Data Persistence
+Data is stored in `/app/server/data/storage` inside the container. Mount a volume to persist data:
+```bash
+-v /path/on/host:/app/server/data/storage
+```
+
 ## API Documentation
 
 Visit `http://localhost:3001/api` for full API documentation.
