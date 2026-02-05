@@ -1,25 +1,7 @@
-# CC Shifter - Docker Image
-# Multi-stage build for optimized production image
+# CC Shifter API Server
+# Standalone API server (use with separate web container)
 
-# Stage 1: Build client
-FROM node:20-alpine AS client-builder
-
-WORKDIR /app/client
-
-# Copy client package files
-COPY client/package*.json ./
-
-# Install client dependencies
-RUN npm ci
-
-# Copy client source
-COPY client/ ./
-
-# Build client
-RUN npm run build
-
-# Stage 2: Production server
-FROM node:20-alpine AS production
+FROM node:20-alpine
 
 WORKDIR /app
 
@@ -30,7 +12,7 @@ RUN apk add --no-cache dumb-init
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nodejs -u 1001
 
-# Copy server package files
+# Copy package files
 COPY package*.json ./
 
 # Install production dependencies only
@@ -38,9 +20,6 @@ RUN npm ci --only=production
 
 # Copy server source
 COPY server/ ./server/
-
-# Copy built client from builder stage
-COPY --from=client-builder /app/client/dist ./client/dist
 
 # Create data directory with proper permissions
 RUN mkdir -p /app/server/data/storage && \

@@ -103,36 +103,62 @@ Password: admin123
 
 ## Docker
 
+The application runs as two containers:
+- **Web** (nginx) - Serves the React frontend on port 80
+- **API** (Node.js) - Runs the backend API on port 3001
+
 ### Quick Start with Docker Compose
 ```bash
 docker-compose up -d
 ```
 
-The application will be available at `http://localhost:3001`
+The application will be available at `http://localhost`
+
+### Architecture
+```
+┌─────────────────┐     ┌─────────────────┐
+│   Web (nginx)   │────▶│   API (Node)    │
+│    Port 80      │     │   Port 3001     │
+└─────────────────┘     └─────────────────┘
+        │                       │
+   React SPA              REST API
+   Static files          Data storage
+```
 
 ### Build and Run Manually
 ```bash
-# Build the image
-docker build -t cc-shifter .
+# Build images
+docker build -t cc-shifter-api .
+docker build -t cc-shifter-web ./client
 
-# Run the container
+# Create network
+docker network create cc-shifter-net
+
+# Run API
 docker run -d \
-  --name cc-shifter \
-  -p 3001:3001 \
+  --name cc-shifter-api \
+  --network cc-shifter-net \
   -v cc-shifter-data:/app/server/data/storage \
   -e JWT_SECRET=your-secret-key \
-  cc-shifter
+  cc-shifter-api
+
+# Run Web
+docker run -d \
+  --name cc-shifter-web \
+  --network cc-shifter-net \
+  -p 80:80 \
+  cc-shifter-web
 ```
 
 ### Environment Variables
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | 3001 | Server port |
+| `PORT` | 3001 | API server port |
 | `NODE_ENV` | production | Environment mode |
 | `JWT_SECRET` | (default) | Secret for JWT tokens (change in production!) |
 
 ### Data Persistence
-Data is stored in `/app/server/data/storage` inside the container. Mount a volume to persist data:
+Data is stored in `/app/server/data/storage` inside the API container. Mount a volume to persist data:
 ```bash
 -v /path/on/host:/app/server/data/storage
 ```

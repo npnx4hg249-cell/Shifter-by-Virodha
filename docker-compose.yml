@@ -1,19 +1,38 @@
 version: '3.8'
 
 services:
-  cc-shifter:
+  # Web Application (React + Nginx)
+  web:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    container_name: cc-shifter-web
+    ports:
+      - "80:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # API Server (Node.js)
+  api:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: cc-shifter
-    ports:
-      - "3001:3001"
+    container_name: cc-shifter-api
+    expose:
+      - "3001"
     environment:
       - NODE_ENV=production
       - PORT=3001
       - JWT_SECRET=${JWT_SECRET:-cc-shifter-secret-change-in-production}
     volumes:
-      # Persist data between container restarts
       - cc-shifter-data:/app/server/data/storage
     restart: unless-stopped
     healthcheck:
