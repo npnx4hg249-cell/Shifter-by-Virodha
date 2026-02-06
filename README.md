@@ -93,32 +93,22 @@ A comprehensive shift planning application for engineering teams of 19-25 engine
 
 ---
 
-## What's New
+## What's New in v2.0
 
-### Latest Features
-1. **Renamed to "Shifter for ICES"** - New branding with styled header
-2. **New Versioning Schema** - Format: YY.WW.D.HH.MM.X (e.g., 26.6.5.18.30.1)
-3. **Two-Factor Authentication** - TOTP-based 2FA for enhanced security
-4. **Strong Password Policy** - 10+ characters, special chars, numbers, no dictionary words
-5. **Account Lockout** - Locks after 4 failed attempts, admin unlock required
-6. **Auto Sign-out** - Automatic logout after 1 hour inactivity
-7. **Dark Mode** - Per-user dark mode preference
-8. **Training Engineers** - "In Training" flag with automatic shift assignment
-9. **Password Management** - Reset passwords with generation and email delivery
-10. **Edit Published Schedules** - Make corrections after publishing
-11. **Delete Unpublished Schedules** - Remove draft schedules
-12. **Shift Counts** - View shift count per day on schedule edit page
-13. **Latest Schedule Preview** - Dashboard shows current published schedule
-14. **SMTP Settings** - Configure email in Admin panel
-15. **Availability View** - Renamed from "Calendar" for clarity
-16. **Unique Email Validation** - Prevent duplicate engineer emails
-17. **Admin Creation** - Create additional admin users
-18. **Locked Account Alerts** - Admins see locked accounts on dashboard
-
-### Scheduling Rule Improvements
-- **2 consecutive OFF days** per 7-day period (Mon-Sun)
-- **Maximum 6 consecutive work days** enforcement
-- **Training shift support** with automatic weekend OFF
+### Major Features
+1. **Renamed to ICES-Shifter**  Intelligent Constraint-based Engineering Scheduler ( That is not what it stands for but good try)
+2. **Version Management** - Semantic versioning with changelog
+3. **Auto-Update from GitHub** - Check and apply updates from within the admin portal
+4. **Excel Import/Export** - Support for .xlsx files in addition to CSV
+5. **Unavailability Calendar** - Visual calendar to mark sick/vacation days (SAP-ready)
+6. **Schedule Preview** - View partial schedules even when generation fails
+7. **24-Month Archiving** - Historical schedule storage with role-based access
+8. **Manual Shift Editing** - Edit individual shifts with validation
+9. **Admin-as-Engineer** - Link admin/manager accounts to engineer profiles
+10. **Email Notifications** - Notify users when schedules change
+11. **Engineer Schedule View** - Engineers can view their schedules directly
+12. **Shift Consistency Rule** - Maintains shift type consistency week-to-week
+13. **Weekend Shift Preferences** - Separate preferences for weekend shifts
 
 ---
 
