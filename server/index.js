@@ -89,8 +89,8 @@ const securityHeaders = (req, res, next) => {
   // Permissions Policy
   res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
 
-  // HSTS (only in production with HTTPS)
-  if (process.env.NODE_ENV === 'production') {
+  // HSTS (only in production with HTTPS, skip if HTTPS redirect is disabled)
+  if (process.env.NODE_ENV === 'production' && process.env.DISABLE_HTTPS_REDIRECT !== 'true') {
     res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   }
 
@@ -98,7 +98,13 @@ const securityHeaders = (req, res, next) => {
 };
 
 // HTTPS enforcement in production
+// Skip when running behind a trusted reverse proxy (like nginx in Docker)
 const enforceHttps = (req, res, next) => {
+  // Skip HTTPS enforcement if explicitly disabled (e.g., Docker behind nginx)
+  if (process.env.DISABLE_HTTPS_REDIRECT === 'true') {
+    return next();
+  }
+
   if (process.env.NODE_ENV === 'production' &&
       req.headers['x-forwarded-proto'] !== 'https' &&
       !req.secure) {
