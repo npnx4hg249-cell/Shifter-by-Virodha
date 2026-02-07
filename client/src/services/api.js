@@ -168,6 +168,13 @@ class ApiService {
     });
   }
 
+  // Duplicate user
+  async duplicateUser(id) {
+    return this.request(`/users/${id}/duplicate`, {
+      method: 'POST'
+    });
+  }
+
   // User bulk upload
   async bulkUploadUsersExcel(excelData) {
     return this.request('/users/bulk-upload-excel', {
