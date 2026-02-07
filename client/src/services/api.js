@@ -183,6 +183,13 @@ class ApiService {
     });
   }
 
+  async bulkUploadUsersCSV(csvData) {
+    return this.request('/users/bulk-upload', {
+      method: 'POST',
+      body: JSON.stringify({ csvData })
+    });
+  }
+
   // User export
   async exportUsersCSV() {
     const response = await fetch(`${API_BASE}/users/export/csv`, {
@@ -190,6 +197,10 @@ class ApiService {
         'Authorization': `Bearer ${this.getToken()}`
       }
     });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `Export failed (${response.status})`);
+    }
     return response.blob();
   }
 
@@ -199,6 +210,10 @@ class ApiService {
         'Authorization': `Bearer ${this.getToken()}`
       }
     });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.error || `Export failed (${response.status})`);
+    }
     return response.blob();
   }
 

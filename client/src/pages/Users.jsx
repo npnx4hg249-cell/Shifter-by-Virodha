@@ -243,12 +243,22 @@ function Users() {
     setUploadResults(null);
     setError('');
 
+    const isCSV = file.name.toLowerCase().endsWith('.csv');
+
     try {
       const reader = new FileReader();
       reader.onload = async (e) => {
         try {
-          const base64 = e.target.result.split(',')[1];
-          const response = await api.bulkUploadUsersExcel(base64);
+          let response;
+          if (isCSV) {
+            // For CSV files, read as text
+            const csvData = e.target.result;
+            response = await api.bulkUploadUsersCSV(csvData);
+          } else {
+            // For Excel files, read as base64
+            const base64 = e.target.result.split(',')[1];
+            response = await api.bulkUploadUsersExcel(base64);
+          }
           // Server returns { results: { success: [], errors: [] } }
           setUploadResults(response.results || response);
           if (response.results?.success?.length > 0 || response.success?.length > 0) {
@@ -263,7 +273,13 @@ function Users() {
           setUploading(false);
         }
       };
-      reader.readAsDataURL(file);
+
+      // Read CSV as text, Excel as DataURL (base64)
+      if (isCSV) {
+        reader.readAsText(file);
+      } else {
+        reader.readAsDataURL(file);
+      }
     } catch (err) {
       setError(err.message);
       setUploading(false);
@@ -317,6 +333,12 @@ function Users() {
       const response = await fetch(`/api${endpoint}`, {
         headers: { 'Authorization': `Bearer ${api.getToken()}` }
       });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || `Failed to download template (${response.status})`);
+      }
+
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -326,6 +348,8 @@ function Users() {
       a.click();
       document.body.removeChild(a);
       window.URL.revokeObjectURL(url);
+      setSuccess(`${format.toUpperCase()} template downloaded`);
+      setTimeout(() => setSuccess(''), 3000);
     } catch (err) {
       setError(err.message || 'Failed to download template');
     }
