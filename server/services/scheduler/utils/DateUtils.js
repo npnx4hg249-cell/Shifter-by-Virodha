@@ -10,6 +10,9 @@ import {
   parseISO, isValid
 } from 'date-fns';
 
+// Re-export format from date-fns for convenience
+export { format };
+
 /**
  * Format a date to YYYY-MM-DD string
  */
@@ -212,6 +215,7 @@ export function groupDaysByWeek(days) {
 }
 
 export default {
+  format,
   toDateString,
   parseDate,
   getMonthDays,
