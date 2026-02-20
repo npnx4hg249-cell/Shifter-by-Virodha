@@ -223,7 +223,7 @@ function shuffleArray(arr) {
   return result;
 }
 
-const MAX_GENERATE_ITERATIONS = 500;
+const MAX_GENERATE_ITERATIONS = 1000;
 
 /**
  * POST /api/schedules/generate
@@ -259,6 +259,11 @@ router.post('/generate', authenticate, requireManager, (req, res) => {
   // Create the date for the month
   const monthDate = new Date(year, month - 1, 1);
 
+  // Fetch previous month's published schedule for cross-month continuity
+  const prevMonth = month === 1 ? 12 : month - 1;
+  const prevYear = month === 1 ? year - 1 : year;
+  const previousMonthSchedule = getPublishedScheduleForMonth(prevYear, prevMonth);
+
   // Iterative generation - try up to MAX_GENERATE_ITERATIONS times, stop on success
   let bestResult = null;
   let bestErrorCount = Infinity;
@@ -274,7 +279,8 @@ router.post('/generate', authenticate, requireManager, (req, res) => {
       engineers: iterEngineers,
       month: monthDate,
       holidays,
-      approvedRequests
+      approvedRequests,
+      previousMonthSchedule: previousMonthSchedule?.data || null
     });
 
     const result = scheduler.solve();
@@ -358,6 +364,11 @@ router.post('/generate-with-option', authenticate, requireManager, (req, res) =>
   const approvedRequests = getApprovedRequestsForMonth(year, month);
   const monthDate = new Date(year, month - 1, 1);
 
+  // Fetch previous month's published schedule for cross-month continuity
+  const prevMonth = month === 1 ? 12 : month - 1;
+  const prevYear = month === 1 ? year - 1 : year;
+  const previousMonthSchedule = getPublishedScheduleForMonth(prevYear, prevMonth);
+
   // Apply option modifications
   let modifiedOptions = {};
 
@@ -391,6 +402,7 @@ router.post('/generate-with-option', authenticate, requireManager, (req, res) =>
       month: monthDate,
       holidays,
       approvedRequests,
+      previousMonthSchedule: previousMonthSchedule?.data || null,
       ...modifiedOptions
     });
 

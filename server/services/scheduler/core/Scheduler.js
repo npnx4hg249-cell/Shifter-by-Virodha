@@ -17,7 +17,7 @@ import { DayShiftStrategy } from '../strategies/DayShiftStrategy.js';
 import { FloaterStrategy } from '../strategies/FloaterStrategy.js';
 
 // Configuration constants
-const MAX_ITERATIONS = 250;
+const MAX_ITERATIONS = 1000;
 const TARGET_SHIFTS_PER_WEEK = 5; // Target 5 working days per week for core engineers
 const MIN_SHIFTS_PER_WEEK = 4;   // Minimum shifts to avoid month-off scenarios
 
@@ -55,6 +55,77 @@ export class Scheduler {
     this.violations = [];
     this.warnings = [];
     this.stats = null;
+
+    // Pre-compute previous month tail data for cross-month continuity
+    this.prevMonthTail = this._buildPrevMonthTail();
+  }
+
+  /**
+   * Build a lookup of the last 6 days of the previous month's schedule
+   * for each engineer, used to prevent German labor law violations
+   * (max 6 consecutive work days) across month boundaries.
+   * Returns { engineerId: [{ date, shift }, ...] } sorted chronologically.
+   */
+  _buildPrevMonthTail() {
+    if (!this.previousMonthSchedule) return {};
+
+    const tail = {};
+    // Get the previous month's date range (last 6 days)
+    const prevMonthDate = new Date(this.month.getFullYear(), this.month.getMonth() - 1, 1);
+    const prevDays = getMonthDays(prevMonthDate);
+    const lastDays = prevDays.slice(-6); // Last 6 days of previous month
+
+    for (const engineer of this.engineers) {
+      const entries = [];
+      for (const day of lastDays) {
+        const dateStr = toDateString(day);
+        const shift = this.previousMonthSchedule[engineer.id]?.[dateStr];
+        if (shift !== undefined) {
+          entries.push({ date: dateStr, shift, day });
+        }
+      }
+      if (entries.length > 0) {
+        tail[engineer.id] = entries;
+      }
+    }
+
+    return tail;
+  }
+
+  /**
+   * Get the shift for an engineer on a date, checking both current schedule and
+   * previous month's schedule for cross-month boundary lookups.
+   */
+  getShiftWithPrevMonth(schedule, engineerId, dateStr) {
+    const shift = schedule[engineerId]?.[dateStr];
+    if (shift !== undefined && shift !== null) return shift;
+
+    // Check previous month's schedule
+    if (this.previousMonthSchedule) {
+      return this.previousMonthSchedule[engineerId]?.[dateStr] || null;
+    }
+    return null;
+  }
+
+  /**
+   * Count consecutive work days at the end of the previous month for an engineer.
+   * Used to ensure the new month doesn't create a streak > 6 when combined.
+   */
+  getPrevMonthTrailingWorkDays(engineerId) {
+    const entries = this.prevMonthTail[engineerId];
+    if (!entries || entries.length === 0) return 0;
+
+    let count = 0;
+    // Walk backwards from the last day
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const shift = entries[i].shift;
+      if (shift && shift !== SHIFTS.OFF && shift !== SHIFTS.UNAVAILABLE) {
+        count++;
+      } else {
+        break;
+      }
+    }
+    return count;
   }
 
   /**
@@ -230,6 +301,28 @@ export class Scheduler {
     const weeks = this.getWeeksInMonth();
     const coreEngineers = this.engineers.filter(e => !e.isFloater && !e.inTraining);
     const errors = [];
+
+    // For the first week, enforce early OFF days for engineers who ended
+    // the previous month with a long work streak (German labor law: max 6 consecutive)
+    if (weeks.length > 0) {
+      for (const engineer of coreEngineers) {
+        const trailingWorkDays = this.getPrevMonthTrailingWorkDays(engineer.id);
+        if (trailingWorkDays >= 4) {
+          // This engineer needs an OFF day within the first (6 - trailing) days
+          const maxWorkBeforeOff = Math.max(0, ArbZG.MAX_CONSECUTIVE_WORK_DAYS - trailingWorkDays);
+          const firstWeek = weeks[0];
+
+          for (let d = 0; d < firstWeek.length && d <= maxWorkBeforeOff; d++) {
+            const dateStr = toDateString(firstWeek[d]);
+            const current = schedule[engineer.id][dateStr];
+            // If the slot at the deadline is unassigned, mark it OFF
+            if (d === maxWorkBeforeOff && (current === null || current === undefined)) {
+              schedule[engineer.id][dateStr] = SHIFTS.OFF;
+            }
+          }
+        }
+      }
+    }
 
     // Process each week
     for (const week of weeks) {
@@ -441,6 +534,49 @@ export class Scheduler {
     for (const engineer of this.engineers) {
       const violations = validateScheduleCompliance(schedule, engineer.id, days);
       errors.push(...violations);
+
+      // Also check cross-month consecutive work days
+      const trailingWorkDays = this.getPrevMonthTrailingWorkDays(engineer.id);
+      if (trailingWorkDays > 0) {
+        let currentStreak = trailingWorkDays;
+        for (const day of days) {
+          const dateStr = toDateString(day);
+          const shift = schedule[engineer.id]?.[dateStr];
+          if (shift && shift !== SHIFTS.OFF && shift !== SHIFTS.UNAVAILABLE) {
+            currentStreak++;
+            if (currentStreak > ArbZG.MAX_CONSECUTIVE_WORK_DAYS) {
+              errors.push({
+                type: 'ARBZG_CONSECUTIVE_DAYS_CROSS_MONTH',
+                severity: 'critical',
+                law: '§11 ArbZG',
+                message: `${engineer.name} has ${currentStreak} consecutive work days across month boundary (max ${ArbZG.MAX_CONSECUTIVE_WORK_DAYS})`,
+                date: dateStr
+              });
+              break; // Only report once per engineer
+            }
+          } else {
+            break; // Streak broken
+          }
+        }
+      }
+
+      // Check transition from last day of previous month to first day of this month
+      const prevTail = this.prevMonthTail[engineer.id];
+      if (prevTail && prevTail.length > 0 && days.length > 0) {
+        const lastPrevShift = prevTail[prevTail.length - 1].shift;
+        const firstDateStr = toDateString(days[0]);
+        const firstShift = schedule[engineer.id]?.[firstDateStr];
+        const violation = getTransitionViolation(lastPrevShift, firstShift);
+        if (violation) {
+          errors.push({
+            type: 'transition_violation_cross_month',
+            engineer: engineer.name,
+            date: firstDateStr,
+            law: violation.law,
+            message: `${engineer.name}: ${lastPrevShift} → ${firstShift} across month boundary on ${firstDateStr} - ${violation.reason}`
+          });
+        }
+      }
     }
 
     // 3. Check floater rules
@@ -741,9 +877,9 @@ export class Scheduler {
               const overShift = schedule[over.id]?.[dateStr];
               if (!overShift || overShift === SHIFTS.OFF || overShift === SHIFTS.UNAVAILABLE) continue;
 
-              // Check if underworked can take this shift
+              // Check if underworked can take this shift (including cross-month boundary)
               const prevDateStr = toDateString(getPreviousDay(day));
-              const prevShift = schedule[under.id]?.[prevDateStr];
+              const prevShift = this.getShiftWithPrevMonth(schedule, under.id, prevDateStr);
               const violation = getTransitionViolation(prevShift, overShift);
 
               if (!violation) {
@@ -866,9 +1002,10 @@ export class Scheduler {
       }
     }
 
-    // 2. Check for consecutive work days > 6
+    // 2. Check for consecutive work days > 6 (including previous month's trailing days)
     for (const engineer of this.engineers) {
-      let consecutiveCount = 0;
+      // Start with previous month's trailing work days
+      let consecutiveCount = this.getPrevMonthTrailingWorkDays(engineer.id);
       let streakStart = null;
 
       for (const day of days) {
@@ -899,8 +1036,38 @@ export class Scheduler {
       }
     }
 
-    // 3. Check transition violations
+    // 3. Check transition violations (including cross-month boundary for day 0)
     for (const engineer of this.engineers) {
+      // Check transition from previous month's last day to first day of this month
+      if (days.length > 0) {
+        const firstDateStr = toDateString(days[0]);
+        const firstShift = schedule[engineer.id]?.[firstDateStr];
+        const prevMonthLastDateStr = toDateString(getPreviousDay(days[0]));
+        const prevMonthLastShift = this.getShiftWithPrevMonth(schedule, engineer.id, prevMonthLastDateStr);
+
+        if (prevMonthLastShift) {
+          const crossViolation = getTransitionViolation(prevMonthLastShift, firstShift);
+          if (crossViolation) {
+            const compatible = this.getCompatibleShifts(null, prevMonthLastShift);
+            if (compatible.length > 0 && compatible[0] !== firstShift) {
+              schedule[engineer.id][firstDateStr] = compatible[0];
+              fixes.push({
+                engineer: engineer.name,
+                action: 'transition_fix_cross_month',
+                message: `Changed ${firstDateStr} from ${firstShift} to ${compatible[0]} for ${engineer.name} to fix cross-month ${prevMonthLastShift}→${firstShift} violation`
+              });
+            } else {
+              schedule[engineer.id][firstDateStr] = SHIFTS.OFF;
+              fixes.push({
+                engineer: engineer.name,
+                action: 'transition_fix_cross_month_off',
+                message: `Changed ${firstDateStr} to OFF for ${engineer.name} to fix cross-month ${prevMonthLastShift}→${firstShift} violation`
+              });
+            }
+          }
+        }
+      }
+
       for (let i = 1; i < days.length; i++) {
         const prevDateStr = toDateString(days[i - 1]);
         const currDateStr = toDateString(days[i]);
@@ -1043,15 +1210,16 @@ export class Scheduler {
               const currentValue = filled[engineer.id][dateStr];
               if (currentValue !== null && currentValue !== undefined) return false;
 
-              // Check transition validity
+              // Check transition validity (including cross-month boundary)
               const prevDateStr = toDateString(getPreviousDay(day));
-              const prevShift = filled[engineer.id]?.[prevDateStr];
+              const prevShift = this.getShiftWithPrevMonth(filled, engineer.id, prevDateStr);
               const violation = getTransitionViolation(prevShift, shift);
               if (violation) return false;
 
-              // Check consecutive work days
+              // Check consecutive work days (including previous month's trailing days)
               let consecutive = 0;
-              for (let i = days.indexOf(day) - 1; i >= 0 && consecutive < 6; i--) {
+              const dayIdx = days.indexOf(day);
+              for (let i = dayIdx - 1; i >= 0 && consecutive < 6; i--) {
                 const checkDateStr = toDateString(days[i]);
                 const checkShift = filled[engineer.id]?.[checkDateStr];
                 if (checkShift && checkShift !== SHIFTS.OFF && checkShift !== SHIFTS.UNAVAILABLE) {
@@ -1059,6 +1227,10 @@ export class Scheduler {
                 } else {
                   break;
                 }
+              }
+              // If we reached the start of the month without a break, add previous month trailing days
+              if (dayIdx - consecutive <= 0 && consecutive < 6) {
+                consecutive += this.getPrevMonthTrailingWorkDays(engineer.id);
               }
               if (consecutive >= 5) return false;
 
@@ -1118,13 +1290,13 @@ export class Scheduler {
           const current = schedule[engineer.id]?.[dateStr];
           if (current !== null && current !== undefined) return false;
 
-          // Check transition validity
+          // Check transition validity (including cross-month boundary)
           const prevDateStr = toDateString(getPreviousDay(day));
-          const prevShift = schedule[engineer.id]?.[prevDateStr];
+          const prevShift = this.getShiftWithPrevMonth(schedule, engineer.id, prevDateStr);
           const violation = getTransitionViolation(prevShift, shift);
           if (violation) return false;
 
-          // Check consecutive work days
+          // Check consecutive work days (including previous month's trailing days)
           let consecutive = 0;
           const dayIndex = days.findIndex(d => toDateString(d) === dateStr);
           for (let i = dayIndex - 1; i >= 0 && consecutive < 6; i--) {
@@ -1135,6 +1307,10 @@ export class Scheduler {
             } else {
               break;
             }
+          }
+          // If we reached the start of the month without a break, add previous month trailing days
+          if (dayIndex - consecutive <= 0 && consecutive < 6) {
+            consecutive += this.getPrevMonthTrailingWorkDays(engineer.id);
           }
           if (consecutive >= 5) return false;
 
