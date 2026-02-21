@@ -669,7 +669,7 @@ export class Scheduler {
     const coreEngineers = this.engineers.filter(e => !e.isFloater && !e.inTraining);
     const floaters = this.engineers.filter(e => e.isFloater);
 
-    // 1. Check coverage
+    // 1. Check coverage (min AND max)
     for (const day of days) {
       const dateStr = toDateString(day);
       const isWknd = isWeekend(day);
@@ -680,6 +680,7 @@ export class Scheduler {
           schedule[e.id][dateStr] === shift
         ).length;
 
+        // Check minimum coverage
         if (coreCoverage < dayCoverage[shift].min) {
           errors.push({
             type: 'coverage_violation',
@@ -688,6 +689,19 @@ export class Scheduler {
             actual: coreCoverage,
             required: dayCoverage[shift].min,
             message: `${shift} on ${dateStr}: ${coreCoverage} core engineers, need ${dayCoverage[shift].min}`
+          });
+        }
+
+        // Check maximum coverage (especially important for Night)
+        const maxCoverage = dayCoverage[shift].max;
+        if (maxCoverage && coreCoverage > maxCoverage) {
+          errors.push({
+            type: 'coverage_exceeded',
+            shift,
+            date: dateStr,
+            actual: coreCoverage,
+            max: maxCoverage,
+            message: `${shift} on ${dateStr}: ${coreCoverage} core engineers, max is ${maxCoverage}`
           });
         }
       }
@@ -942,7 +956,8 @@ export class Scheduler {
         if (targetCurrent !== null && targetCurrent !== undefined) continue;
 
         // Try to copy the same shift, but check constraints
-        if (sourceShift && sourceShift !== SHIFTS.UNAVAILABLE) {
+        // SKIP Night shifts - they are already assigned for the entire month by NightShiftStrategy
+        if (sourceShift && sourceShift !== SHIFTS.UNAVAILABLE && sourceShift !== SHIFTS.NIGHT) {
           // Check if the transition from previous day is valid
           const prevDateStr = toDateString(getPreviousDay(targetWeek[dayIndex]));
           const prevShift = schedule[engineer.id]?.[prevDateStr];
@@ -968,7 +983,8 @@ export class Scheduler {
    * Get compatible shifts based on pattern and previous shift
    */
   getCompatibleShifts(pattern, prevShift) {
-    const allShifts = [SHIFTS.EARLY, SHIFTS.MORNING, SHIFTS.LATE, SHIFTS.NIGHT];
+    // Exclude Night - handled separately by NightShiftStrategy
+    const allShifts = [SHIFTS.EARLY, SHIFTS.LATE, SHIFTS.MORNING];
     const compatible = [];
 
     for (const shift of allShifts) {
