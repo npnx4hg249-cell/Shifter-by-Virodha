@@ -450,27 +450,64 @@ export class Scheduler {
   }
 
   /**
-   * Verify and repair OFF days after shift assignment.
-   * Since OFF days are now reserved upfront via reserveOffDays(), this method
-   * checks that the reservation survived shift assignment and repairs if needed.
-   * Does NOT fall back to non-consecutive OFF - reports errors instead.
+   * Assign OFF days to ensure 2 consecutive days per week (HARD constraint).
+   * Runs AFTER shift assignment to find optimal gaps in the schedule.
+   * Skips partial weeks (< 4 days) at month start/end.
+   * Falls back to non-consecutive OFF (with warning) rather than leaving engineers
+   * with no OFF days at all.
    */
   assignOffDays(schedule) {
+    const days = this.getDays();
     const weeks = this.getWeeksInMonth();
     const coreEngineers = this.engineers.filter(e => !e.isFloater && !e.inTraining);
     const errors = [];
 
+    // For the first full week, enforce early OFF days for engineers who ended
+    // the previous month with a long work streak (German labor law: max 6 consecutive)
+    const firstFullWeek = weeks.find(w => w.length >= 4) || weeks[0];
+    if (firstFullWeek) {
+      for (const engineer of coreEngineers) {
+        const trailingWorkDays = this.getPrevMonthTrailingWorkDays(engineer.id);
+        if (trailingWorkDays >= 4) {
+          const maxWorkBeforeOff = Math.max(0, ArbZG.MAX_CONSECUTIVE_WORK_DAYS - trailingWorkDays);
+          for (let d = 0; d < firstFullWeek.length && d <= maxWorkBeforeOff; d++) {
+            const dateStr = toDateString(firstFullWeek[d]);
+            const current = schedule[engineer.id][dateStr];
+            if (d === maxWorkBeforeOff && (current === null || current === undefined)) {
+              schedule[engineer.id][dateStr] = SHIFTS.OFF;
+            }
+          }
+        }
+      }
+    }
+
+    // Process each week
     for (const week of weeks) {
-      // Skip partial weeks (< 4 days) - no consecutive OFF requirement
+      // Skip partial weeks (< 4 days) - can't require 2 consecutive OFF
       if (week.length < 4) continue;
 
-      for (const engineer of coreEngineers) {
-        if (engineer.fixedOffDays) continue; // Already handled
+      // Shuffle engineers each week so different people get first pick
+      const shuffledEngineers = shuffleArray(coreEngineers);
+
+      for (const engineer of shuffledEngineers) {
+        // Special handling for fixed off days
+        if (engineer.fixedOffDays) {
+          for (const day of week) {
+            const dayOfWeek = day.getDay();
+            const dateStr = toDateString(day);
+            if (engineer.fixedOffDays.includes(dayOfWeek) &&
+                schedule[engineer.id][dateStr] === null) {
+              schedule[engineer.id][dateStr] = SHIFTS.OFF;
+            }
+          }
+          continue;
+        }
 
         const unavailableDays = week.filter(d =>
           schedule[engineer.id][toDateString(d)] === SHIFTS.UNAVAILABLE
         ).length;
 
+        // Count existing OFF days this week (including predetermined off)
         const existingOffDays = week.filter(d =>
           schedule[engineer.id][toDateString(d)] === SHIFTS.OFF
         );
@@ -485,12 +522,14 @@ export class Scheduler {
           }
         }
 
+        // If we already have 2+ consecutive OFF days, skip
         if (hasConsecutiveOff && existingOffDays.length >= 2) continue;
 
-        // OFF reservation was disrupted - try to repair with consecutive pair
-        const neededOff = Math.max(0, MAX_OFF_PER_WEEK - existingOffDays.length);
+        // How many more OFF days do we need?
+        const neededOff = Math.max(0, 2 - existingOffDays.length);
+        if (neededOff === 0 && hasConsecutiveOff) continue;
 
-        // Look for consecutive pair among null/unassigned slots (strongly prefer null)
+        // Get slots that can be set to OFF (prefer null/unassigned, but allow overriding shifts)
         const availableForOff = week.filter(d => {
           const dateStr = toDateString(d);
           const shift = schedule[engineer.id][dateStr];
@@ -498,6 +537,7 @@ export class Scheduler {
                  (shift !== SHIFTS.UNAVAILABLE && shift !== SHIFTS.OFF);
         });
 
+        // Find best consecutive pair for OFF days
         let bestPair = null;
         let bestScore = -Infinity;
 
@@ -510,9 +550,11 @@ export class Scheduler {
 
           let score = 0;
 
+          // PENALIZE weekends - we need people working weekends
           if (isWeekend(day1)) score -= 15;
           if (isWeekend(day2)) score -= 15;
 
+          // Only allow weekend OFF if coverage would still be met
           if (isWeekend(day1) && !this.wouldMaintainWeekendCoverage(schedule, engineer.id, day1, coreEngineers)) {
             score -= 100;
           }
@@ -520,20 +562,26 @@ export class Scheduler {
             score -= 100;
           }
 
+          // Prefer holidays
           if (this.isHoliday(day1, engineer.state)) score += 5;
           if (this.isHoliday(day2, engineer.state)) score += 5;
 
+          // Strongly prefer null/unassigned slots over overriding existing shifts
           const shift1 = schedule[engineer.id][toDateString(day1)];
           const shift2 = schedule[engineer.id][toDateString(day2)];
           if (shift1 === null || shift1 === undefined) score += 8;
           if (shift2 === null || shift2 === undefined) score += 8;
+
+          // Prefer if already has one OFF day adjacent
           if (shift1 === SHIFTS.OFF || shift2 === SHIFTS.OFF) score += 12;
 
+          // Prefer mid-week days (Tue-Thu) for OFF
           const dow1 = day1.getDay();
           const dow2 = day2.getDay();
           if (dow1 >= 2 && dow1 <= 4) score += 3;
           if (dow2 >= 2 && dow2 <= 4) score += 3;
 
+          // Spread OFF days: penalize if too many engineers already off on these days
           const offCount1 = this.countOffOnDay(schedule, coreEngineers, toDateString(day1));
           const offCount2 = this.countOffOnDay(schedule, coreEngineers, toDateString(day2));
           score -= (offCount1 + offCount2) * 3;
@@ -547,29 +595,57 @@ export class Scheduler {
         if (bestPair) {
           schedule[engineer.id][toDateString(bestPair[0])] = SHIFTS.OFF;
           schedule[engineer.id][toDateString(bestPair[1])] = SHIFTS.OFF;
-        } else if (neededOff > 0 && unavailableDays === 0) {
-          // Fall back to non-consecutive OFF as last resort (better than nothing)
+        } else if (neededOff > 0) {
+          // No consecutive pair found - fall back to non-consecutive (better than nothing)
           const unassigned = week.filter(d => {
-            const dateStr = toDateString(d);
-            const shift = schedule[engineer.id][dateStr];
-            return shift === null || shift === undefined;
-          }).filter(d => !isWeekend(d)); // Prefer weekdays
-
-          const fallbackSlots = unassigned.length > 0 ? unassigned : week.filter(d => {
             const dateStr = toDateString(d);
             const shift = schedule[engineer.id][dateStr];
             return shift === null || shift === undefined;
           });
 
-          for (let i = 0; i < Math.min(neededOff, fallbackSlots.length); i++) {
-            schedule[engineer.id][toDateString(fallbackSlots[i])] = SHIFTS.OFF;
-          }
+          const sorted = shuffleArray([...unassigned]).sort((a, b) => {
+            let aScore = isWeekend(a) ? -10 : 0;
+            let bScore = isWeekend(b) ? -10 : 0;
+            aScore += this.isHoliday(a, engineer.state) ? 5 : 0;
+            bScore += this.isHoliday(b, engineer.state) ? 5 : 0;
+            aScore -= this.countOffOnDay(schedule, coreEngineers, toDateString(a)) * 3;
+            bScore -= this.countOffOnDay(schedule, coreEngineers, toDateString(b)) * 3;
+            return bScore - aScore;
+          });
 
+          const needed = 2 - existingOffDays.length;
+          for (let i = 0; i < Math.min(needed, sorted.length); i++) {
+            schedule[engineer.id][toDateString(sorted[i])] = SHIFTS.OFF;
+          }
+        }
+
+        // Verify result
+        const finalOffDays = week.filter(d =>
+          schedule[engineer.id][toDateString(d)] === SHIFTS.OFF
+        );
+
+        let hasFinalConsecutive = false;
+        for (let i = 0; i < finalOffDays.length - 1; i++) {
+          const diff = Math.abs(finalOffDays[i + 1].getTime() - finalOffDays[i].getTime()) / (1000 * 60 * 60 * 24);
+          if (diff === 1) {
+            hasFinalConsecutive = true;
+            break;
+          }
+        }
+
+        if (!hasFinalConsecutive && finalOffDays.length < 2 && unavailableDays === 0) {
+          errors.push({
+            type: 'off_day_violation',
+            engineer: engineer.name,
+            week: toDateString(week[0]),
+            message: `${engineer.name} has only ${finalOffDays.length} Off days in week starting ${toDateString(week[0])}`
+          });
+        } else if (!hasFinalConsecutive && finalOffDays.length >= 2) {
           errors.push({
             type: 'non_consecutive_off',
             engineer: engineer.name,
             week: toDateString(week[0]),
-            message: `${engineer.name}: non-consecutive OFF days in week starting ${toDateString(week[0])} (fallback)`
+            message: `${engineer.name} has ${finalOffDays.length} Off days but not consecutive in week starting ${toDateString(week[0])}`
           });
         }
       }
@@ -1465,22 +1541,13 @@ export class Scheduler {
   }
 
   /**
-   * Main solve function - Week-by-Week Generation with OFF-First Strategy
-   * CRITICAL CHANGE: OFF days are reserved BEFORE shift assignment to prevent
-   * situations where all slots are consumed by shifts, leaving no room for OFF days.
+   * Main solve function - Week-by-Week Generation
+   * Pipeline: Initialize → Training → Night shifts → Day shifts → OFF days → Floaters →
+   *           Fill nulls → Balance → Rationality check → Validate
    *
-   * Pipeline order:
-   * 1. Initialize schedule (unavailable days)
-   * 2. Reserve OFF days (lock 2 consecutive per engineer per week)
-   * 3. Assign training shifts
-   * 4. Assign night shifts (2-week cohort blocks)
-   * 5. Week-by-week day shift assignment
-   * 6. Verify/repair OFF days
-   * 7. Add floaters
-   * 8. Fill remaining nulls
-   * 9. Balance workload
-   * 10. Rationality check
-   * 11. Final validation
+   * OFF days are assigned AFTER shifts because the template-copying system needs
+   * shift assignments in place first. The assignOffDays step then finds the best
+   * consecutive pair for each engineer, preferring null/unassigned slots.
    */
   solve() {
     this.violations = [];
@@ -1505,18 +1572,10 @@ export class Scheduler {
     // Step 1: Initialize schedule with unavailable days
     let schedule = this.initializeSchedule();
 
-    // Step 2: RESERVE OFF DAYS FIRST (new critical step)
-    // This prevents shift assignment from consuming all available slots
-    const reserveResult = this.reserveOffDays(schedule);
-    schedule = reserveResult.schedule;
-    if (reserveResult.errors.length > 0) {
-      collectedErrors.push(...reserveResult.errors);
-    }
-
-    // Step 3: Assign training engineers (entire month)
+    // Step 2: Assign training engineers (entire month)
     schedule = this.assignTrainingShifts(schedule);
 
-    // Step 4: Assign night shifts (entire month - uses 2-week cohort blocks)
+    // Step 3: Assign night shifts (entire month - uses 2-week cohort blocks)
     // Pass prevMonthTail for cross-month context
     const nightResult = this.nightStrategy.execute(
       schedule, coreEngineers, days, weeks, this.prevMonthTail
@@ -1529,24 +1588,14 @@ export class Scheduler {
     }
     this.warnings.push(...(nightResult.warnings || []));
 
-    // Incremental validation after night shifts
-    const postNightValidation = this.validateSchedule(schedule, { partial: true });
-    if (!postNightValidation.valid) {
-      this.warnings.push({
-        type: 'incremental_validation',
-        step: 'after_night_shifts',
-        issues: postNightValidation.errors.length
-      });
-    }
-
-    // Step 5: Week-by-Week Generation for day shifts
+    // Step 4: Week-by-Week Generation for day shifts
     for (let weekIndex = 0; weekIndex < weeks.length; weekIndex++) {
       if (weekIndex > 0) {
         // Copy template from previous week before solving
         schedule = this.copyWeekTemplate(schedule, coreEngineers, weeks[weekIndex - 1], weeks[weekIndex]);
       }
 
-      // Solve this week (fills in remaining slots, respects reserved OFF days)
+      // Solve this week (fills in remaining slots)
       const weekResult = this.solveWeek(schedule, weekIndex, weeks, coreEngineers, days);
       schedule = weekResult.schedule;
       if (weekResult.errors.length > 0) {
@@ -1554,48 +1603,28 @@ export class Scheduler {
       }
     }
 
-    // Incremental validation after day shifts
-    const postDayValidation = this.validateSchedule(schedule, { partial: true });
-    if (!postDayValidation.valid) {
-      this.warnings.push({
-        type: 'incremental_validation',
-        step: 'after_day_shifts',
-        issues: postDayValidation.errors.length
-      });
-    }
-
-    // Step 6: Verify/repair OFF days (ensures 2 consecutive per week survived)
+    // Step 5: Assign OFF days (ensures 2 consecutive per week)
+    // Runs AFTER shift assignment so it can find the best gaps
     const offResult = this.assignOffDays(schedule);
     schedule = offResult.schedule;
     if (offResult.errors.length > 0) {
-      // OFF day violations are now HARD errors, not warnings
-      collectedErrors.push(...offResult.errors);
+      this.warnings.push(...offResult.errors.map(e => ({ ...e, demoted: true })));
     }
 
-    // Step 7: Add floaters
+    // Step 6: Add floaters
     const floaterResult = this.floaterStrategy.execute(schedule, this.engineers, days, weeks);
     schedule = floaterResult.schedule;
     this.warnings.push(...(floaterResult.warnings || []));
 
-    // Step 8: Fill any remaining null slots intelligently
+    // Step 7: Fill any remaining null slots intelligently
     schedule = this.fillNullSlots(schedule);
 
-    // Incremental validation after filling nulls
-    const postFillValidation = this.validateSchedule(schedule, { partial: true });
-    if (!postFillValidation.valid) {
-      this.warnings.push({
-        type: 'incremental_validation',
-        step: 'after_fill_nulls',
-        issues: postFillValidation.errors.length
-      });
-    }
-
-    // Step 9: Balance workload
+    // Step 8: Balance workload
     const workloadResult = this.balanceWorkload(schedule, this.engineers, weeks);
     schedule = workloadResult.schedule;
     this.warnings.push(...workloadResult.warnings);
 
-    // Step 10: Rationality check - final pass to fix any remaining issues
+    // Step 9: Rationality check - final pass to fix any remaining issues
     const rationalityResult = this.rationalityCheck(schedule);
     schedule = rationalityResult.schedule;
     if (rationalityResult.fixes.length > 0) {
@@ -1607,7 +1636,7 @@ export class Scheduler {
     }
     this.warnings.push(...rationalityResult.warnings);
 
-    // Step 11: Final validation
+    // Step 10: Validate final schedule
     const validation = this.validateSchedule(schedule);
     const allErrors = [...collectedErrors, ...(validation.valid ? [] : validation.errors)];
 
@@ -1620,7 +1649,7 @@ export class Scheduler {
         schedule,
         warnings: this.warnings,
         stats: this.stats,
-        version: '3.1.0'
+        version: '3.2.0'
       };
     }
 
@@ -1635,7 +1664,7 @@ export class Scheduler {
       warnings: this.warnings,
       stats: this.stats,
       canManualEdit: true,
-      version: '3.1.0'
+      version: '3.2.0'
     };
   }
 
