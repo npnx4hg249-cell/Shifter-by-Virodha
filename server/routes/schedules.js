@@ -310,10 +310,17 @@ router.post('/generate', authenticate, requireManager, (req, res) => {
       bestResult = { ...result, iterations: totalIterations };
     }
 
+    // Early stop: perfect solution found
+    if (bestErrorCount === 0) break;
+
     // Early stop: good-enough solution found after reasonable attempts
-    if (iteration >= 10 && bestErrorCount <= 2) break;
+    // With the improved OFF-first pipeline, we expect fewer errors
+    if (iteration >= 5 && bestErrorCount <= 1) break;
+    if (iteration >= 15 && bestErrorCount <= 2) break;
+    if (iteration >= 30 && bestErrorCount <= 3) break;
+
     // Diminishing returns: if no improvement in many iterations, stop
-    if (iteration >= 50 && bestErrorCount <= 5) break;
+    if (iteration >= 100 && bestErrorCount <= 5) break;
   }
 
   // No perfect solution found - save best partial schedule for manual editing
@@ -434,8 +441,16 @@ router.post('/generate-with-option', authenticate, requireManager, (req, res) =>
       bestResult = { ...result, iterations: totalIterations };
     }
 
-    if (iteration >= 10 && bestErrorCount <= 2) break;
-    if (iteration >= 50 && bestErrorCount <= 5) break;
+    // Early stop: perfect solution found
+    if (bestErrorCount === 0) break;
+
+    // Early stop: good-enough solution with improved pipeline
+    if (iteration >= 5 && bestErrorCount <= 1) break;
+    if (iteration >= 15 && bestErrorCount <= 2) break;
+    if (iteration >= 30 && bestErrorCount <= 3) break;
+
+    // Diminishing returns
+    if (iteration >= 100 && bestErrorCount <= 5) break;
   }
 
   // Save best partial schedule for manual editing
