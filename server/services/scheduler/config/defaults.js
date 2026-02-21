@@ -31,18 +31,20 @@ export const SHIFT_TIMES = {
 };
 
 // Default coverage requirements
+// Priority: Early/Late (highest) > Night > Morning (lowest)
+// Morning is covered by overlapping Early and Late shifts
 export const DEFAULT_COVERAGE = {
   weekday: {
     [SHIFTS.EARLY]: { min: 3, preferred: 3 },
-    [SHIFTS.MORNING]: { min: 3, preferred: 3 },
+    [SHIFTS.MORNING]: { min: 2, preferred: 2 },
     [SHIFTS.LATE]: { min: 3, preferred: 3 },
-    [SHIFTS.NIGHT]: { min: 2, preferred: 3 }
+    [SHIFTS.NIGHT]: { min: 2, preferred: 3, max: 3 }
   },
   weekend: {
     [SHIFTS.EARLY]: { min: 2, preferred: 2 },
-    [SHIFTS.MORNING]: { min: 2, preferred: 2 },
+    [SHIFTS.MORNING]: { min: 1, preferred: 1 },
     [SHIFTS.LATE]: { min: 2, preferred: 2 },
-    [SHIFTS.NIGHT]: { min: 2, preferred: 2 }
+    [SHIFTS.NIGHT]: { min: 2, preferred: 2, max: 3 }
   }
 };
 
