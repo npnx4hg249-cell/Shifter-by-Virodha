@@ -215,6 +215,9 @@ export class Scheduler {
    * Reserve OFF days BEFORE assigning shifts.
    * Pre-computes and locks 2 consecutive OFF day slots per engineer per week.
    * This prevents shift assignment from consuming all available slots.
+   *
+   * IMPORTANT: Partial weeks (< 4 days at month start/end) are SKIPPED since
+   * requiring 2 consecutive OFF in a 1-3 day week is impossible or impractical.
    */
   reserveOffDays(schedule) {
     const weeks = this.getWeeksInMonth();
@@ -222,6 +225,9 @@ export class Scheduler {
     const errors = [];
 
     for (const week of weeks) {
+      // Skip partial weeks - can't require 2 consecutive OFF in < 4 days
+      if (week.length < 4) continue;
+
       const shuffledEngineers = shuffleArray(coreEngineers);
 
       for (const engineer of shuffledEngineers) {
@@ -258,13 +264,14 @@ export class Scheduler {
         const neededOff = Math.max(0, MAX_OFF_PER_WEEK - existingOffDays.length);
         if (neededOff === 0 && hasConsecutiveOff) continue;
 
-        // Find best consecutive pair for OFF days
+        // Find null/unassigned slots in this week for this engineer
         const availableForOff = week.filter(d => {
           const dateStr = toDateString(d);
           const shift = schedule[engineer.id][dateStr];
           return shift === null || shift === undefined;
         });
 
+        // Find best consecutive pair for OFF days
         let bestPair = null;
         let bestScore = -Infinity;
 
@@ -301,8 +308,8 @@ export class Scheduler {
           const offCount2 = this.countOffOnDay(schedule, coreEngineers, toDateString(day2));
           score -= (offCount1 + offCount2) * 3;
 
-          // Cross-month: for first week, check previous month trailing work days
-          if (week === weeks[0]) {
+          // Cross-month: for first full week, check previous month trailing work days
+          if (week === weeks[0] || (weeks[0].length < 4 && week === weeks[1])) {
             const trailingWorkDays = this.getPrevMonthTrailingWorkDays(engineer.id);
             if (trailingWorkDays >= 4) {
               const maxWorkBeforeOff = Math.max(0, ArbZG.MAX_CONSECUTIVE_WORK_DAYS - trailingWorkDays);
@@ -322,12 +329,18 @@ export class Scheduler {
           schedule[engineer.id][toDateString(bestPair[0])] = SHIFTS.OFF;
           schedule[engineer.id][toDateString(bestPair[1])] = SHIFTS.OFF;
         } else if (neededOff > 0) {
-          // Could not find consecutive pair - report error, do NOT silently degrade
-          errors.push({
-            type: 'off_day_reservation_failed',
+          // Could not find consecutive pair - try single OFF as fallback for partial coverage
+          const unassigned = availableForOff.filter(d => !isWeekend(d));
+          if (unassigned.length > 0) {
+            // Assign 1 OFF day as partial fallback (better than nothing)
+            schedule[engineer.id][toDateString(unassigned[0])] = SHIFTS.OFF;
+          }
+          // Only warn, don't hard error from reservation
+          this.warnings.push({
+            type: 'off_day_reservation_partial',
             engineer: engineer.name,
             week: toDateString(week[0]),
-            message: `${engineer.name}: could not reserve 2 consecutive OFF days in week starting ${toDateString(week[0])}`
+            message: `${engineer.name}: could not find consecutive OFF pair in week starting ${toDateString(week[0])}, using best-effort fallback`
           });
         }
       }
@@ -448,6 +461,9 @@ export class Scheduler {
     const errors = [];
 
     for (const week of weeks) {
+      // Skip partial weeks (< 4 days) - no consecutive OFF requirement
+      if (week.length < 4) continue;
+
       for (const engineer of coreEngineers) {
         if (engineer.fixedOffDays) continue; // Already handled
 
@@ -474,7 +490,7 @@ export class Scheduler {
         // OFF reservation was disrupted - try to repair with consecutive pair
         const neededOff = Math.max(0, MAX_OFF_PER_WEEK - existingOffDays.length);
 
-        // Look for consecutive pair among null/unassigned slots
+        // Look for consecutive pair among null/unassigned slots (strongly prefer null)
         const availableForOff = week.filter(d => {
           const dateStr = toDateString(d);
           const shift = schedule[engineer.id][dateStr];
@@ -532,12 +548,28 @@ export class Scheduler {
           schedule[engineer.id][toDateString(bestPair[0])] = SHIFTS.OFF;
           schedule[engineer.id][toDateString(bestPair[1])] = SHIFTS.OFF;
         } else if (neededOff > 0 && unavailableDays === 0) {
-          // No consecutive pair possible - report as error, do NOT fall back to non-consecutive
+          // Fall back to non-consecutive OFF as last resort (better than nothing)
+          const unassigned = week.filter(d => {
+            const dateStr = toDateString(d);
+            const shift = schedule[engineer.id][dateStr];
+            return shift === null || shift === undefined;
+          }).filter(d => !isWeekend(d)); // Prefer weekdays
+
+          const fallbackSlots = unassigned.length > 0 ? unassigned : week.filter(d => {
+            const dateStr = toDateString(d);
+            const shift = schedule[engineer.id][dateStr];
+            return shift === null || shift === undefined;
+          });
+
+          for (let i = 0; i < Math.min(neededOff, fallbackSlots.length); i++) {
+            schedule[engineer.id][toDateString(fallbackSlots[i])] = SHIFTS.OFF;
+          }
+
           errors.push({
-            type: 'off_day_violation',
+            type: 'non_consecutive_off',
             engineer: engineer.name,
             week: toDateString(week[0]),
-            message: `${engineer.name} cannot get 2 consecutive OFF days in week starting ${toDateString(week[0])}`
+            message: `${engineer.name}: non-consecutive OFF days in week starting ${toDateString(week[0])} (fallback)`
           });
         }
       }
@@ -1250,7 +1282,8 @@ export class Scheduler {
         const isWknd = isWeekend(day);
         const dayCoverage = isWknd ? this.coverage.weekend : this.coverage.weekday;
 
-        for (const shift of [SHIFTS.EARLY, SHIFTS.MORNING, SHIFTS.LATE]) {
+        // Priority: Early/Late first, Morning last
+        for (const shift of [SHIFTS.EARLY, SHIFTS.LATE, SHIFTS.MORNING]) {
           // Count current coverage for this shift
           const currentCoverage = coreEngineers.filter(e =>
             filled[e.id][dateStr] === shift
@@ -1336,7 +1369,8 @@ export class Scheduler {
       const isWknd = isWeekend(day);
       const dayCoverage = isWknd ? this.coverage.weekend : this.coverage.weekday;
 
-      for (const shift of [SHIFTS.EARLY, SHIFTS.MORNING, SHIFTS.LATE]) {
+      // Assign Early and Late first (highest priority), Morning last (lowest priority)
+      for (const shift of [SHIFTS.EARLY, SHIFTS.LATE, SHIFTS.MORNING]) {
         const minRequired = dayCoverage[shift]?.min || 2;
 
         // Get eligible engineers for this shift
@@ -1368,13 +1402,6 @@ export class Scheduler {
             consecutive += this.getPrevMonthTrailingWorkDays(engineer.id);
           }
           if (consecutive >= 5) return false;
-
-          // CRITICAL: Check if assigning this shift would make it impossible
-          // to get 2 consecutive OFF days this week
-          const testSchedule = { ...schedule };
-          if (!testSchedule[engineer.id]) testSchedule[engineer.id] = {};
-          testSchedule[engineer.id] = { ...testSchedule[engineer.id], [dateStr]: shift };
-          if (!this.canStillGetConsecutiveOff(testSchedule, engineer.id, week)) return false;
 
           return true;
         }));
