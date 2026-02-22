@@ -1443,18 +1443,24 @@ export class Scheduler {
               if (dayIdx - consecutive <= 0 && consecutive < 6) {
                 consecutive += this.getPrevMonthTrailingWorkDays(engineer.id);
               }
-              if (consecutive >= 5) return false;
+              // German law allows up to 6 consecutive work days
+              if (consecutive >= 6) return false;
 
               return true;
             })).sort((a, b) => shiftCounts.get(a.id) - shiftCounts.get(b.id));
 
+            let filledCount = currentCoverage;
             for (const engineer of candidates) {
-              if (currentCoverage >= minRequired) break;
-              if (shiftCounts.get(engineer.id) >= TARGET_SHIFTS_PER_WEEK) continue;
+              if (filledCount >= minRequired) break;
+              // First try with normal limit, then overflow up to legal max
+              const weekLimit = (filledCount < minRequired - 1)
+                ? ArbZG.MAX_CONSECUTIVE_WORK_DAYS  // urgent: allow up to legal max
+                : TARGET_SHIFTS_PER_WEEK;           // normal: standard limit
+              if (shiftCounts.get(engineer.id) >= weekLimit) continue;
 
               filled[engineer.id][dateStr] = shift;
               shiftCounts.set(engineer.id, shiftCounts.get(engineer.id) + 1);
-              break; // Only assign one engineer at a time to this shift
+              filledCount++;
             }
           }
         }
@@ -1524,7 +1530,8 @@ export class Scheduler {
           if (dayIndex - consecutive <= 0 && consecutive < 6) {
             consecutive += this.getPrevMonthTrailingWorkDays(engineer.id);
           }
-          if (consecutive >= 5) return false;
+          // German law allows up to 6 consecutive work days (ArbZG.MAX_CONSECUTIVE_WORK_DAYS)
+          if (consecutive >= 6) return false;
 
           return true;
         }));
@@ -1559,7 +1566,7 @@ export class Scheduler {
           return { engineer, score };
         }).sort((a, b) => b.score - a.score);
 
-        // Assign shifts
+        // Assign shifts - first pass with normal weekly limit
         let assigned = 0;
         for (const { engineer } of scored) {
           if (assigned >= minRequired) break;
@@ -1570,6 +1577,24 @@ export class Scheduler {
 
           schedule[engineer.id][dateStr] = shift;
           assigned++;
+        }
+
+        // Overflow pass: if coverage still not met, allow up to 6 shifts/week (legal max)
+        if (assigned < minRequired) {
+          for (const { engineer } of scored) {
+            if (assigned >= minRequired) break;
+
+            // Skip already-assigned engineers
+            if (schedule[engineer.id]?.[dateStr] === shift) continue;
+            if (schedule[engineer.id]?.[dateStr] !== null && schedule[engineer.id]?.[dateStr] !== undefined) continue;
+
+            const weekShifts = this.getWeekShiftCount(schedule, engineer.id, week);
+            // Allow up to 6 shifts/week (German law max) for coverage needs
+            if (weekShifts >= ArbZG.MAX_CONSECUTIVE_WORK_DAYS) continue;
+
+            schedule[engineer.id][dateStr] = shift;
+            assigned++;
+          }
         }
 
         if (assigned < minRequired) {
