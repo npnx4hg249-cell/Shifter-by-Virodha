@@ -185,6 +185,41 @@ export class Scheduler {
   }
 
   /**
+   * Check if an engineer can work a specific shift based on their preferences
+   * @param {Object} engineer - The engineer object
+   * @param {string} shift - The shift type (Early, Morning, Late, Night)
+   * @param {Date} date - The date to check (for weekend-specific preferences)
+   */
+  canWorkShift(engineer, shift, date) {
+    // Training engineers only work training shifts
+    if (engineer.inTraining) {
+      return shift === SHIFTS.TRAINING;
+    }
+
+    // Check preferences
+    if (engineer.preferences && engineer.preferences.length > 0) {
+      const isWknd = isWeekend(date);
+
+      if (isWknd) {
+        const weekendPref = `Weekend${shift}`;
+        if (engineer.preferences.includes(weekendPref)) {
+          return true;
+        }
+
+        // If has any weekend preferences defined, must match
+        const hasWeekendPrefs = engineer.preferences.some(p => p.startsWith('Weekend'));
+        if (hasWeekendPrefs) {
+          return false;
+        }
+      }
+
+      return engineer.preferences.includes(shift);
+    }
+
+    return true;
+  }
+
+  /**
    * Check if an unavailable day is a "Predetermined Off" type
    * These count as OFF days, not UNAVAILABLE (they count toward the 2-per-week requirement)
    */
@@ -1516,6 +1551,9 @@ export class Scheduler {
               // German law allows up to 6 consecutive work days
               if (consecutive >= 6) return false;
 
+              // Check if engineer can work this shift based on preferences
+              if (!this.canWorkShift(engineer, shift, day)) return false;
+
               return true;
             })).sort((a, b) => shiftCounts.get(a.id) - shiftCounts.get(b.id));
 
@@ -1547,6 +1585,146 @@ export class Scheduler {
     }
 
     return filled;
+  }
+
+  /**
+   * Aggressive coverage repair pass
+   * Tries to fix remaining coverage gaps by:
+   * 1. Finding engineers with OFF on under-covered days
+   * 2. Moving their OFF day to a different day in the same week
+   * 3. Assigning them to the under-covered shift
+   */
+  repairCoverageGaps(schedule) {
+    const days = this.getDays();
+    const weeks = this.getWeeksInMonth();
+    const coreEngineers = this.engineers.filter(e => !e.isFloater && !e.inTraining);
+    let repairCount = 0;
+
+    // Find all coverage gaps
+    for (const day of days) {
+      const dateStr = toDateString(day);
+      const isWknd = isWeekend(day);
+      const dayCoverage = isWknd ? this.coverage.weekend : this.coverage.weekday;
+
+      // Check each shift for coverage gaps
+      for (const shift of [SHIFTS.EARLY, SHIFTS.LATE, SHIFTS.MORNING, SHIFTS.NIGHT]) {
+        const currentCoverage = coreEngineers.filter(e =>
+          schedule[e.id][dateStr] === shift
+        ).length;
+
+        const minRequired = dayCoverage[shift]?.min || 2;
+
+        if (currentCoverage >= minRequired) continue;
+
+        // Find the week this day belongs to
+        const weekIndex = weeks.findIndex(w => w.some(d => toDateString(d) === dateStr));
+        if (weekIndex < 0) continue;
+        const week = weeks[weekIndex];
+
+        // Find engineers with OFF on this day who could work this shift
+        const candidates = coreEngineers.filter(eng => {
+          if (schedule[eng.id][dateStr] !== SHIFTS.OFF) return false;
+
+          // Check if they can work this shift (preferences)
+          if (!this.canWorkShift(eng, shift, day)) return false;
+
+          // Check transition validity
+          const prevDateStr = toDateString(getPreviousDay(day));
+          const prevShift = this.getShiftWithPrevMonth(schedule, eng.id, prevDateStr);
+          const violation = getTransitionViolation(prevShift, shift);
+          if (violation) return false;
+
+          // Check next day transition
+          const nextDay = days[days.indexOf(day) + 1];
+          if (nextDay) {
+            const nextDateStr = toDateString(nextDay);
+            const nextShift = schedule[eng.id][nextDateStr];
+            const nextViolation = getTransitionViolation(shift, nextShift);
+            if (nextViolation) return false;
+          }
+
+          return true;
+        });
+
+        // Try to reassign each candidate
+        for (const engineer of candidates) {
+          if (currentCoverage >= minRequired) break;
+
+          // Find an alternative day in the same week to move their OFF to
+          let moved = false;
+          for (const altDay of shuffleArray([...week])) {
+            const altDateStr = toDateString(altDay);
+            if (altDateStr === dateStr) continue;
+
+            const altShift = schedule[engineer.id][altDateStr];
+            // Must have a work shift we can convert to OFF
+            if (!altShift || altShift === SHIFTS.OFF || altShift === SHIFTS.UNAVAILABLE) continue;
+
+            // Check if converting this day to OFF would hurt coverage
+            const altIsWknd = isWeekend(altDay);
+            const altDayCoverage = altIsWknd ? this.coverage.weekend : this.coverage.weekday;
+            const altCoverage = coreEngineers.filter(e =>
+              schedule[e.id][altDateStr] === altShift
+            ).length;
+
+            // Only allow if alternative day has surplus coverage
+            if (altCoverage <= altDayCoverage[altShift]?.min) continue;
+
+            // Check that we maintain 2 consecutive OFF days requirement
+            // Find the other OFF day(s) in this week
+            const offDays = week.filter(d =>
+              schedule[engineer.id][toDateString(d)] === SHIFTS.OFF &&
+              toDateString(d) !== dateStr // Exclude the day we're converting
+            );
+
+            // After the swap: we remove dateStr from OFF, add altDateStr to OFF
+            // Check if altDateStr would be consecutive with another OFF day
+            let hasConsecutiveOff = false;
+            const altDayIndex = week.indexOf(altDay);
+            if (altDayIndex > 0) {
+              const prevWeekDay = week[altDayIndex - 1];
+              if (schedule[engineer.id][toDateString(prevWeekDay)] === SHIFTS.OFF ||
+                  toDateString(prevWeekDay) === altDateStr) {
+                hasConsecutiveOff = true;
+              }
+            }
+            if (altDayIndex < week.length - 1 && !hasConsecutiveOff) {
+              const nextWeekDay = week[altDayIndex + 1];
+              if (schedule[engineer.id][toDateString(nextWeekDay)] === SHIFTS.OFF) {
+                hasConsecutiveOff = true;
+              }
+            }
+
+            // If we can't maintain consecutive OFF, skip
+            if (!hasConsecutiveOff && offDays.length < 2) continue;
+
+            // Perform the swap
+            schedule[engineer.id][dateStr] = shift;
+            schedule[engineer.id][altDateStr] = SHIFTS.OFF;
+            moved = true;
+            repairCount++;
+            break;
+          }
+
+          if (moved) {
+            // Recalculate coverage for this shift
+            const newCoverage = coreEngineers.filter(e =>
+              schedule[e.id][dateStr] === shift
+            ).length;
+            if (newCoverage >= minRequired) break;
+          }
+        }
+      }
+    }
+
+    if (repairCount > 0) {
+      this.warnings.push({
+        type: 'coverage_repair',
+        message: `Repaired ${repairCount} coverage gaps by reassigning OFF days`
+      });
+    }
+
+    return schedule;
   }
 
   /**
@@ -1601,6 +1779,9 @@ export class Scheduler {
           }
           // German law allows up to 6 consecutive work days (ArbZG.MAX_CONSECUTIVE_WORK_DAYS)
           if (consecutive >= 6) return false;
+
+          // Check if engineer can work this shift based on preferences
+          if (!this.canWorkShift(engineer, shift, day)) return false;
 
           return true;
         }));
@@ -1764,6 +1945,9 @@ export class Scheduler {
     // Step 7: Fill any remaining null slots intelligently
     schedule = this.fillNullSlots(schedule);
 
+    // Step 7b: Aggressive coverage repair - swap OFF days to fill remaining gaps
+    schedule = this.repairCoverageGaps(schedule);
+
     // Step 8: Balance workload
     const workloadResult = this.balanceWorkload(schedule, this.engineers, weeks);
     schedule = workloadResult.schedule;
@@ -1794,7 +1978,7 @@ export class Scheduler {
         schedule,
         warnings: this.warnings,
         stats: this.stats,
-        version: '3.5.0'
+        version: '3.6.0'
       };
     }
 
@@ -1809,7 +1993,7 @@ export class Scheduler {
       warnings: this.warnings,
       stats: this.stats,
       canManualEdit: true,
-      version: '3.5.0'
+      version: '3.6.0'
     };
   }
 
