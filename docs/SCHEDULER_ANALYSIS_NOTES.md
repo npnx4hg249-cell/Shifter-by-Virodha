@@ -115,7 +115,103 @@ weekend: { Early: min 2, Late: min 2, Morning: min 1, Night: min 2 max 3 }
 
 ---
 
+## Round 2 Analysis (v3.3.0 → v3.4.0)
+
+### Results After Interleaved OFF Fix:
+- Errors reduced from ~70 to 25
+- Coverage now works in weeks 2+ (main fix successful)
+- Remaining errors are scattered shortfalls, not total collapses
+
+### Remaining Error Categories:
+| Shift | # Errors | Pattern |
+|-------|----------|---------|
+| Early | 10 | Short by 1-2 on most weekdays |
+| Late | 6 | Short by 1 on scattered days |
+| Morning | 5 | 0 coverage on several days |
+| Night | 4 | Short by 1 on transition days |
+
+### Root Causes Found:
+
+1. **Consecutive check `>= 5` too conservative** (all 3 files)
+   - German law: `ArbZG.MAX_CONSECUTIVE_WORK_DAYS = 6`
+   - Code blocked at 5: `if (consecutive >= 5) return false;`
+   - Should be `>= 6` — gives ~20% more scheduling capacity
+   - Affected: `solveWeek()`, `fillNullSlots()`, `DayShiftStrategy.js`
+
+2. **TARGET_SHIFTS_PER_WEEK = 5 hard cap blocks coverage**
+   - `if (weekShifts >= TARGET_SHIFTS_PER_WEEK) continue;`
+   - Engineers at 5 shifts skipped even when coverage isn't met
+   - Fix: Add overflow pass allowing up to 6 shifts (legal max)
+
+3. **fillNullSlots() only fills +1 per shift gap**
+   - `break;` after first assignment per shift
+   - Shift needing 3 with 1 only gets bumped to 2
+   - Fix: Remove break, loop until minRequired met
+
+4. **Night cohort too small (3) for handling unavailability**
+   - When 1 of 3 is unavailable, coverage drops to 1
+   - Fix: Select cohort of 4, cap daily assignment at 3
+
+### Fixes Applied (v3.4.0):
+- Changed consecutive threshold: `>= 5` → `>= 6` (3 locations)
+- Added overflow pass in solveWeek (allows up to 6 shifts/week for coverage)
+- Fixed fillNullSlots to fill all gaps, not just +1
+- Increased night cohort size from 3 to 4 (cap stays at 3/day)
+
+---
+
+## Round 3: Predetermined OFF Fix (v3.4.0 → v3.5.0)
+
+### Bug Found:
+When an engineer has 2+ predetermined OFF days that aren't consecutive (e.g., Tue + Thu),
+`assignOffDaysForWeek()` would fall through the guard clauses and add a FULL PAIR of OFF
+days on top, giving the engineer 4 OFF days instead of 2.
+
+**Root cause**: Guard clause was `if (hasConsecutiveOff && existingOffDays.length >= 2)` —
+requires BOTH conditions true. With non-consecutive predetermined OFF, `hasConsecutiveOff`
+is false, so the guard fails.
+
+### Fix:
+Restructured OFF assignment into 3 clear cases:
+1. **Have 2+ OFF (including predetermined)**: Done — skip entirely. Just warn if non-consecutive.
+2. **Have 1 OFF (e.g., 1 predetermined)**: Add 1 more, prefer adjacent for consecutiveness.
+3. **Have 0 OFF**: Find best consecutive pair (existing logic).
+
+Also part of this commit: consecutive threshold fix, overflow pass, fillNullSlots gap fill,
+and night cohort resilience from Round 2.
+
+---
+
+## Round 4: Pre Scheduled Day Off Data Flow Fix (v3.4.0 → v3.5.0)
+
+### Bug Found:
+Pre Scheduled Day Off wasn't being respected - showed as UNAVAILABLE instead of OFF in generated schedules.
+
+**Root cause**: Data flow mismatch between routes:
+- UI (`EngineerUnavailability.jsx`) calls `api.addUserUnavailableDates()` → `/users/:id/unavailable-dates`
+- Scheduler's `isPredeterminedOff()` checks `engineer.unavailableTypes[dateStr]` (a map)
+- But `users.js` POST route only stored `unavailableDates` array, NOT `unavailableTypes` map
+- Meanwhile `engineers.js` route correctly stored the map, but UI wasn't calling that endpoint
+
+### Fixes Applied:
+1. **users.js POST route**: Now stores `unavailableTypes`, `unavailableNotes`, `unavailableSources` maps
+   alongside the existing `unavailableDates` array (consistent with engineers.js)
+2. **users.js DELETE route**: Now cleans up the maps when dates are removed
+3. **Scheduler isPredeterminedOff()**: Added fallback to check `unavailableDates` array for legacy data
+4. **fillNullSlots overflow**: Fixed bug where shortfall of 1 used standard limit (5) instead of legal max (6)
+
+### Additional Fix:
+In `fillNullSlots()`, the overflow logic only used legal max (6 shifts/week) when short by 2+,
+but used standard limit (5) when short by just 1. Changed to always use legal max when under coverage.
+
+---
+
 ## Commits History:
+- `4abbf7f` - Fix Pre Scheduled Day Off data flow and improve coverage overflow (v3.5.0)
+- `eac57d3` - Fix predetermined OFF data flow and rename to Pre Scheduled Day Off
+- `f5ef42d` - Fix predetermined OFF counting and prevent excess OFF assignment
+- `5559d55` - Refine scheduler: fix consecutive threshold, overflow pass, and night cohort
+- `a4d46f0` - Fix consecutive work day check by interleaving OFF assignment per week
 - `249f65e` - Remove template copying, solve each week independently
 - `3989068` - Fix Night shift duplication and add max coverage enforcement
 - `8dbe3a6` - Revert OFF-first pipeline, fix partial week handling and coverage

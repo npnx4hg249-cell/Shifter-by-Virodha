@@ -189,9 +189,23 @@ export class Scheduler {
    * These count as OFF days, not UNAVAILABLE (they count toward the 2-per-week requirement)
    */
   isPredeterminedOff(engineer, dateStr) {
+    // First check the unavailableTypes map (preferred format)
     const type = engineer.unavailableTypes?.[dateStr];
-    // Support both new 'predetermined_off' and legacy 'unavailable' type
-    return type === 'predetermined_off' || type === 'unavailable';
+    if (type === 'predetermined_off') {
+      return true;
+    }
+
+    // Fallback: check unavailableDates array (legacy format from users route)
+    const unavailableDates = engineer.unavailableDates || [];
+    for (const item of unavailableDates) {
+      if (typeof item === 'object' && item.date === dateStr) {
+        if (item.type === 'predetermined_off') {
+          return true;
+        }
+      }
+    }
+
+    return false;
   }
 
   /**
@@ -1508,10 +1522,9 @@ export class Scheduler {
             let filledCount = currentCoverage;
             for (const engineer of candidates) {
               if (filledCount >= minRequired) break;
-              // First try with normal limit, then overflow up to legal max
-              const weekLimit = (filledCount < minRequired - 1)
-                ? ArbZG.MAX_CONSECUTIVE_WORK_DAYS  // urgent: allow up to legal max
-                : TARGET_SHIFTS_PER_WEEK;           // normal: standard limit
+              // When under coverage, always allow up to legal max (6 shifts/week)
+              // Only use standard limit (5) when coverage is already met
+              const weekLimit = ArbZG.MAX_CONSECUTIVE_WORK_DAYS;
               if (shiftCounts.get(engineer.id) >= weekLimit) continue;
 
               filled[engineer.id][dateStr] = shift;
@@ -1781,7 +1794,7 @@ export class Scheduler {
         schedule,
         warnings: this.warnings,
         stats: this.stats,
-        version: '3.4.0'
+        version: '3.5.0'
       };
     }
 
@@ -1796,7 +1809,7 @@ export class Scheduler {
       warnings: this.warnings,
       stats: this.stats,
       canManualEdit: true,
-      version: '3.4.0'
+      version: '3.5.0'
     };
   }
 
