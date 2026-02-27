@@ -1482,8 +1482,9 @@ export class Scheduler {
 
   /**
    * Fill any remaining null slots intelligently
-   * First tries to assign work shifts to engineers with low shift counts,
-   * then fills remaining slots with OFF
+   * 1. First: Fill coverage gaps (under minimum)
+   * 2. Second: Ensure all engineers reach TARGET_SHIFTS_PER_WEEK (5)
+   * 3. Third: Fill remaining nulls with OFF
    */
   fillNullSlots(schedule) {
     const days = this.getDays();
@@ -1495,45 +1496,37 @@ export class Scheduler {
       filled[engineer.id] = { ...(schedule[engineer.id] || {}) };
     }
 
-    // First pass: try to assign work shifts to under-scheduled engineers
     const coreEngineers = this.engineers.filter(e => !e.isFloater && !e.inTraining);
 
+    // First pass: Fill coverage gaps
     for (const week of weeks) {
-      // Calculate shift counts
       const shiftCounts = new Map();
       for (const engineer of coreEngineers) {
         shiftCounts.set(engineer.id, this.getWeekShiftCount(filled, engineer.id, week));
       }
 
-      // Find null slots and try to fill with work shifts for under-scheduled engineers
       for (const day of week) {
         const dateStr = toDateString(day);
         const isWknd = isWeekend(day);
         const dayCoverage = isWknd ? this.coverage.weekend : this.coverage.weekday;
 
-        // Priority: Early first, Morning (has rest restrictions), then Late
         for (const shift of [SHIFTS.EARLY, SHIFTS.MORNING, SHIFTS.LATE]) {
-          // Count current coverage for this shift
           const currentCoverage = coreEngineers.filter(e =>
             filled[e.id][dateStr] === shift
           ).length;
 
           const minRequired = dayCoverage[shift]?.min || 2;
 
-          // If under coverage, try to assign from engineers with null slots
           if (currentCoverage < minRequired) {
-            // Sort engineers by shift count (ascending) with randomization for ties
             const candidates = shuffleArray(coreEngineers.filter(engineer => {
               const currentValue = filled[engineer.id][dateStr];
               if (currentValue !== null && currentValue !== undefined) return false;
 
-              // Check transition validity (including cross-month boundary)
               const prevDateStr = toDateString(getPreviousDay(day));
               const prevShift = this.getShiftWithPrevMonth(filled, engineer.id, prevDateStr);
               const violation = getTransitionViolation(prevShift, shift);
               if (violation) return false;
 
-              // Check consecutive work days (including previous month's trailing days)
               let consecutive = 0;
               const dayIdx = days.indexOf(day);
               for (let i = dayIdx - 1; i >= 0 && consecutive < 6; i--) {
@@ -1545,26 +1538,19 @@ export class Scheduler {
                   break;
                 }
               }
-              // If we reached the start of the month without a break, add previous month trailing days
               if (dayIdx - consecutive <= 0 && consecutive < 6) {
                 consecutive += this.getPrevMonthTrailingWorkDays(engineer.id);
               }
-              // German law allows up to 6 consecutive work days
               if (consecutive >= 6) return false;
 
-              // Check if engineer can work this shift based on preferences
               if (!this.canWorkShift(engineer, shift, day)) return false;
-
               return true;
             })).sort((a, b) => shiftCounts.get(a.id) - shiftCounts.get(b.id));
 
             let filledCount = currentCoverage;
             for (const engineer of candidates) {
               if (filledCount >= minRequired) break;
-              // When under coverage, always allow up to legal max (6 shifts/week)
-              // Only use standard limit (5) when coverage is already met
-              const weekLimit = ArbZG.MAX_CONSECUTIVE_WORK_DAYS;
-              if (shiftCounts.get(engineer.id) >= weekLimit) continue;
+              if (shiftCounts.get(engineer.id) >= ArbZG.MAX_CONSECUTIVE_WORK_DAYS) continue;
 
               filled[engineer.id][dateStr] = shift;
               shiftCounts.set(engineer.id, shiftCounts.get(engineer.id) + 1);
@@ -1575,7 +1561,80 @@ export class Scheduler {
       }
     }
 
-    // Second pass: fill remaining null slots with OFF
+    // Second pass: Ensure engineers reach TARGET_SHIFTS_PER_WEEK (5 shifts)
+    // This prevents engineers from having too many OFF days
+    for (const week of weeks) {
+      const shiftCounts = new Map();
+      for (const engineer of coreEngineers) {
+        shiftCounts.set(engineer.id, this.getWeekShiftCount(filled, engineer.id, week));
+      }
+
+      // Target shifts based on week length (5 for full weeks, proportional for partial)
+      const targetShifts = week.length >= 5 ? TARGET_SHIFTS_PER_WEEK : Math.min(week.length - 1, TARGET_SHIFTS_PER_WEEK);
+
+      for (const engineer of coreEngineers) {
+        const currentShifts = shiftCounts.get(engineer.id);
+        const unavailCount = week.filter(d =>
+          filled[engineer.id]?.[toDateString(d)] === SHIFTS.UNAVAILABLE
+        ).length;
+        const maxPossible = week.length - unavailCount;
+        const adjustedTarget = Math.min(targetShifts, maxPossible - 2); // Leave room for 2 OFF
+
+        if (currentShifts >= adjustedTarget) continue;
+
+        // Find null slots for this engineer and assign work
+        for (const day of week) {
+          if (shiftCounts.get(engineer.id) >= adjustedTarget) break;
+
+          const dateStr = toDateString(day);
+          const currentValue = filled[engineer.id][dateStr];
+          if (currentValue !== null && currentValue !== undefined) continue;
+
+          const prevDateStr = toDateString(getPreviousDay(day));
+          const prevShift = this.getShiftWithPrevMonth(filled, engineer.id, prevDateStr);
+
+          let consecutive = 0;
+          const dayIdx = days.indexOf(day);
+          for (let i = dayIdx - 1; i >= 0 && consecutive < 6; i--) {
+            const checkDateStr = toDateString(days[i]);
+            const checkShift = filled[engineer.id]?.[checkDateStr];
+            if (checkShift && checkShift !== SHIFTS.OFF && checkShift !== SHIFTS.UNAVAILABLE) {
+              consecutive++;
+            } else {
+              break;
+            }
+          }
+          if (dayIdx - consecutive <= 0 && consecutive < 6) {
+            consecutive += this.getPrevMonthTrailingWorkDays(engineer.id);
+          }
+          if (consecutive >= 6) continue;
+
+          const isWknd = isWeekend(day);
+          const dayCoverage = isWknd ? this.coverage.weekend : this.coverage.weekday;
+
+          // Find a shift they can work
+          for (const shift of [SHIFTS.EARLY, SHIFTS.MORNING, SHIFTS.LATE]) {
+            const violation = getTransitionViolation(prevShift, shift);
+            if (violation) continue;
+            if (!this.canWorkShift(engineer, shift, day)) continue;
+
+            const currentCoverage = coreEngineers.filter(e =>
+              filled[e.id][dateStr] === shift
+            ).length;
+            const preferred = dayCoverage[shift]?.preferred || dayCoverage[shift]?.min || 3;
+
+            // Allow assignment even if at preferred, to fill engineer's schedule
+            if (currentCoverage < preferred + 1) {
+              filled[engineer.id][dateStr] = shift;
+              shiftCounts.set(engineer.id, shiftCounts.get(engineer.id) + 1);
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    // Third pass: fill remaining null slots with OFF
     for (const engineer of this.engineers) {
       for (const day of days) {
         const dateStr = toDateString(day);
