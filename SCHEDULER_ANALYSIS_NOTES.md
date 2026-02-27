@@ -182,6 +182,30 @@ and night cohort resilience from Round 2.
 
 ---
 
+## Round 4: Pre Scheduled Day Off Data Flow Fix (v3.4.0 → v3.5.0)
+
+### Bug Found:
+Pre Scheduled Day Off wasn't being respected - showed as UNAVAILABLE instead of OFF in generated schedules.
+
+**Root cause**: Data flow mismatch between routes:
+- UI (`EngineerUnavailability.jsx`) calls `api.addUserUnavailableDates()` → `/users/:id/unavailable-dates`
+- Scheduler's `isPredeterminedOff()` checks `engineer.unavailableTypes[dateStr]` (a map)
+- But `users.js` POST route only stored `unavailableDates` array, NOT `unavailableTypes` map
+- Meanwhile `engineers.js` route correctly stored the map, but UI wasn't calling that endpoint
+
+### Fixes Applied:
+1. **users.js POST route**: Now stores `unavailableTypes`, `unavailableNotes`, `unavailableSources` maps
+   alongside the existing `unavailableDates` array (consistent with engineers.js)
+2. **users.js DELETE route**: Now cleans up the maps when dates are removed
+3. **Scheduler isPredeterminedOff()**: Added fallback to check `unavailableDates` array for legacy data
+4. **fillNullSlots overflow**: Fixed bug where shortfall of 1 used standard limit (5) instead of legal max (6)
+
+### Additional Fix:
+In `fillNullSlots()`, the overflow logic only used legal max (6 shifts/week) when short by 2+,
+but used standard limit (5) when short by just 1. Changed to always use legal max when under coverage.
+
+---
+
 ## Commits History:
 - `a4d46f0` - Fix consecutive work day check by interleaving OFF assignment per week
 - `249f65e` - Remove template copying, solve each week independently

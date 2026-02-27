@@ -698,13 +698,26 @@ router.post('/:id/unavailable-dates', authenticate, (req, res) => {
   }
 
   const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+  const validTypes = ['sick', 'vacation', 'unavailable', 'personal', 'other', 'predetermined_off'];
   const existingDates = user.unavailableDates || [];
   const newDates = [];
+
+  // Also maintain maps for scheduler compatibility (like engineers.js does)
+  const currentTypes = { ...(user.unavailableTypes || {}) };
+  const currentNotes = { ...(user.unavailableNotes || {}) };
+  const currentSources = { ...(user.unavailableSources || {}) };
 
   for (const item of dates) {
     const dateStr = typeof item === 'string' ? item : item.date;
     if (!dateRegex.test(dateStr)) {
       return res.status(400).json({ error: `Invalid date format: ${dateStr}` });
+    }
+
+    const itemType = item.type || 'unavailable';
+    if (!validTypes.includes(itemType)) {
+      return res.status(400).json({
+        error: `Invalid type: ${itemType}. Must be: ${validTypes.join(', ')}`
+      });
     }
 
     // Check if date already exists
@@ -715,16 +728,28 @@ router.post('/:id/unavailable-dates', authenticate, (req, res) => {
     if (!exists) {
       newDates.push({
         date: dateStr,
-        type: item.type || 'unavailable',
+        type: itemType,
         notes: item.notes || '',
         source: item.source || 'manual',
         addedAt: new Date().toISOString()
       });
     }
+
+    // Always update the maps (even if date exists, allow type updates)
+    currentTypes[dateStr] = itemType;
+    currentNotes[dateStr] = item.notes || '';
+    currentSources[dateStr] = item.source || 'manual';
   }
 
   const updatedDates = [...existingDates, ...newDates];
-  update('users', req.params.id, { unavailableDates: updatedDates });
+
+  // Update all fields including maps for scheduler compatibility
+  update('users', req.params.id, {
+    unavailableDates: updatedDates,
+    unavailableTypes: currentTypes,
+    unavailableNotes: currentNotes,
+    unavailableSources: currentSources
+  });
 
   // Also update simple unavailableDays array for backward compatibility
   const simpleDays = updatedDates.map(d => typeof d === 'string' ? d : d.date);
@@ -765,7 +790,24 @@ router.delete('/:id/unavailable-dates', authenticate, (req, res) => {
     return !dates.includes(dateStr);
   });
 
-  update('users', req.params.id, { unavailableDates: updatedDates });
+  // Also clean up the maps for scheduler compatibility
+  const currentTypes = { ...(user.unavailableTypes || {}) };
+  const currentNotes = { ...(user.unavailableNotes || {}) };
+  const currentSources = { ...(user.unavailableSources || {}) };
+
+  for (const dateStr of dates) {
+    delete currentTypes[dateStr];
+    delete currentNotes[dateStr];
+    delete currentSources[dateStr];
+  }
+
+  // Update all fields including maps
+  update('users', req.params.id, {
+    unavailableDates: updatedDates,
+    unavailableTypes: currentTypes,
+    unavailableNotes: currentNotes,
+    unavailableSources: currentSources
+  });
 
   // Also update simple unavailableDays array for backward compatibility
   const simpleDays = updatedDates.map(d => typeof d === 'string' ? d : d.date);
